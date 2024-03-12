@@ -41,7 +41,7 @@ static EDITSTYLE Styles_IDL[] = {
 };
 
 EDITLEXER lexIDL = {
-	SCLEX_CPP, NP2LEX_IDL,
+	SCLEX_CPP,* NP2LEX_IDL,
 	EDITLEXER_HOLE(L"Interface Definition File", Styles_IDL),
 	L"idl; odl; midl",
 	&Keywords_IDL,

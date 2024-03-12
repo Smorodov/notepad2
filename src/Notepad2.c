@@ -37,11 +37,13 @@
 #include "Styles.h"
 #include "Dialogs.h"
 #include "resource.h"
+#include "dark_mode.h"
+#include "UAHMenuBar.h"
 
 #ifndef SM_CXPADDEDBORDER
 #define SM_CXPADDEDBORDER	92
 #endif
-
+HINSTANCE g_exeInstance=NULL;
 //! show code folding level and state on line number margin
 #define NP2_DEBUG_CODE_FOLDING		0
 
@@ -65,7 +67,7 @@ static HACCEL hAccMain;
 static HACCEL hAccFindReplace;
 static HICON hTrayIcon = NULL;
 static UINT uTrayIconDPI = 0;
-
+BOOL g_darkModeSupported;
 // tab width for notification text
 #define CallTipTabWidthNotification		8
 #define CallTipDefaultMouseDwellTime	250
@@ -339,9 +341,6 @@ static struct CachedStatusItem cachedStatusItem;
 #define DisableDelayedStatusBarRedraw()		cachedStatusItem.updateMask |= (1 << StatusItem_ItemCount)
 
 HINSTANCE	g_hInstance;
-#if NP2_ENABLE_APP_LOCALIZATION_DLL
-HINSTANCE	g_exeInstance;
-#endif
 HANDLE		g_hDefaultHeap;
 HANDLE		g_hScintilla;
 #if _WIN32_WINNT < _WIN32_WINNT_WIN8
@@ -509,6 +508,7 @@ BOOL WINAPI ConsoleHandlerRoutine(DWORD dwCtrlType) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nShowCmd) {
+	g_exeInstance=hInstance;
 	UNREFERENCED_PARAMETER(hPrevInstance);
 	UNREFERENCED_PARAMETER(lpCmdLine);
 #if 0 // used for Clang UBSan or printing debug message on console.
@@ -811,7 +811,7 @@ void InitInstance(HINSTANCE hInstance, int nCmdShow) {
 				   0,
 				   wchWndClass,
 				   WC_NOTEPAD2,
-				   WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+				   WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN |  WS_OVERLAPPEDWINDOW,
 				   wi.x,
 				   wi.y,
 				   wi.cx,
@@ -820,6 +820,11 @@ void InitInstance(HINSTANCE hInstance, int nCmdShow) {
 				   NULL,
 				   hInstance,
 				   NULL);
+	InitDarkMode();
+
+	Style_ToggleUse2ndGlobalStyle();
+		SetWindowTheme(hwnd, L"Explorer", NULL);
+
 	if (IsTopMost()) {
 		SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
 	}
@@ -1098,6 +1103,10 @@ static inline bool IsFileStartsWithDotLog(void) {
 //
 //
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam) {
+    LRESULT lr = 0;
+    if (UAHWndProc(hwnd, umsg, wParam, lParam, &lr)) {
+        return lr;
+    }	
 	static bool bShutdownOK;
 
 	switch (umsg) {
@@ -1108,7 +1117,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
 	case WM_NCHITTEST:
 	case WM_NCCALCSIZE:
 	case WM_NCPAINT:
-	case WM_PAINT:
+	//case WM_PAINT:
 	case WM_ERASEBKGND:
 	case WM_NCMOUSEMOVE:
 	case WM_NCLBUTTONDOWN:
@@ -1125,8 +1134,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
 		}
 		return DefWindowProc(hwnd, umsg, wParam, lParam);
 	}
+//
 
+// 
 	case WM_CREATE:
+		OnWmCreate(hwnd);				
 		return MsgCreate(hwnd, wParam, lParam);
 
 	case WM_DESTROY:
@@ -1402,7 +1414,29 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
 		MsgInitMenu(hwnd, wParam, lParam);
 		break;
 
-	case WM_NOTIFY:
+	case WM_NOTIFY:{
+        NMHDR* lpnm = lParam;
+        switch (lpnm->code) {
+        case NM_CUSTOMDRAW: {
+            LPNMTBCUSTOMDRAW data_ptr = (LPNMTBCUSTOMDRAW)lParam;
+            //if (data_ptr->nmcd.hdr.hwndFrom == hwndReBar)
+			{
+                switch (data_ptr->nmcd.dwDrawStage) {
+                case CDDS_ITEMPREPAINT: {
+                    //  SelectObject(data_ptr->nmcd.hdc, GetFont(L"Microsoft Sans Serif", 15));
+                    FillRect(data_ptr->nmcd.hdc, &data_ptr->nmcd.rc, CreateSolidBrush(RGB(44, 44, 44)));                    
+                    return CDRF_NEWFONT;
+                }
+                case CDDS_PREPAINT: {
+					FillRect(data_ptr->nmcd.hdc, &data_ptr->nmcd.rc, CreateSolidBrush(RGB(64, 64, 64)));                    
+                    return CDRF_NOTIFYITEMDRAW;
+                }
+                }
+            }
+        }
+        }
+    }
+
 		return MsgNotify(hwnd, wParam, lParam);
 
 	case WM_COMMAND:
@@ -1961,13 +1995,32 @@ LRESULT MsgCreate(HWND hwnd, WPARAM wParam, LPARAM lParam) {
 // CreateBars() - Create Toolbar and Statusbar
 //
 //
+// https://stackoverflow.com/questions/75961895/why-does-my-win32-rebar-appear-distorted	
+
+// -------------------------------------------
+// 
+// -------------------------------------------
 void CreateBars(HWND hwnd, HINSTANCE hInstance) {
-	const BOOL bIsAppThemed = IsAppThemed();
-
-	const DWORD dwToolbarStyle = WS_TOOLBAR;
-	hwndToolbar = CreateWindowEx(0, TOOLBARCLASSNAME, NULL, dwToolbarStyle,
-								 0, 0, 0, 0, hwnd, (HMENU)IDC_TOOLBAR, hInstance, NULL);
-
+	const BOOL bIsAppThemed = IsAppThemed();	
+	hwndToolbar = CreateWindowExW(
+		WS_EX_TOOLWINDOW |
+		TBSTYLE_EX_HIDECLIPPEDBUTTONS,
+		TOOLBARCLASSNAME,
+		NULL,
+        CCS_NORESIZE |
+		CCS_NOPARENTALIGN |
+		CCS_NODIVIDER |
+		WS_CHILD |
+		WS_VISIBLE |
+		CCS_ADJUSTABLE |
+		TBSTYLE_ALTDRAG |
+		TBSTYLE_FLAT |
+		TBSTYLE_TOOLTIPS,
+        0, 0, 0, 0,
+        hwnd,
+        (HMENU)0,
+        hInstance,
+        NULL);
 	SendMessage(hwndToolbar, TB_BUTTONSTRUCTSIZE, (WPARAM)sizeof(TBBUTTON), 0);
 
 	bool bExternalBitmap = false;
@@ -2046,7 +2099,7 @@ void CreateBars(HWND hwnd, HINSTANCE hInstance) {
 	WCHAR *pIniSectionBuf = (WCHAR *)NP2HeapAlloc(sizeof(WCHAR) * MAX_INI_SECTION_SIZE_TOOLBAR_LABELS);
 	const int cchIniSection = (int)(NP2HeapSize(pIniSectionBuf) / sizeof(WCHAR));
 	IniSection * const pIniSection = &section;
-
+	int cnt=COUNTOF(tbbMainWnd);
 	IniSectionInit(pIniSection, COUNTOF(tbbMainWnd));
 	LoadIniSection(INI_SECTION_NAME_TOOLBAR_LABELS, pIniSectionBuf, cchIniSection);
 	IniSectionParseArray(pIniSection, pIniSectionBuf, FALSE);
@@ -2072,8 +2125,8 @@ void CreateBars(HWND hwnd, HINSTANCE hInstance) {
 	NP2HeapFree(pIniSectionBuf);
 #endif // NP2_ENABLE_CUSTOMIZE_TOOLBAR_LABELS
 
-	SendMessage(hwndToolbar, TB_SETEXTENDEDSTYLE, 0,
-				SendMessage(hwndToolbar, TB_GETEXTENDEDSTYLE, 0, 0) | TBSTYLE_EX_MIXEDBUTTONS | TBSTYLE_EX_DRAWDDARROWS);
+//	SendMessage(hwndToolbar, TB_SETEXTENDEDSTYLE, 0,
+//	SendMessage(hwndToolbar, TB_GETEXTENDEDSTYLE, 0, 0) | TBSTYLE_EX_MIXEDBUTTONS | TBSTYLE_EX_DRAWDDARROWS);
 
 	if (Toolbar_SetButtons(hwndToolbar, tchToolbarButtons, tbbMainWnd, COUNTOF(tbbMainWnd)) == 0) {
 		Toolbar_SetButtons(hwndToolbar, DefaultToolbarButtons, tbbMainWnd, COUNTOF(tbbMainWnd));
@@ -2081,7 +2134,7 @@ void CreateBars(HWND hwnd, HINSTANCE hInstance) {
 
 	RECT rc;
 	SendMessage(hwndToolbar, TB_GETITEMRECT, 0, (LPARAM)&rc);
-	//SendMessage(hwndToolbar, TB_SETINDENT, 2, 0);
+	SendMessage(hwndToolbar, TB_SETINDENT, 2, 0);
 
 	cachedStatusItem.updateMask = ((1 << StatusItem_ItemCount) - 1) ^ (1 << StatusItem_Empty);
 	GetString(IDS_STATUSITEM_FORMAT, cachedStatusItem.tchItemFormat, COUNTOF(cachedStatusItem.tchItemFormat));
@@ -2090,37 +2143,61 @@ void CreateBars(HWND hwnd, HINSTANCE hInstance) {
 
 	// Create ReBar and add Toolbar
 	const DWORD dwReBarStyle = bShowToolbar ? (WS_REBAR | WS_VISIBLE) : WS_REBAR;
-	hwndReBar = CreateWindowEx(WS_EX_TOOLWINDOW, REBARCLASSNAME, NULL, dwReBarStyle,
-							   0, 0, 0, 0, hwnd, (HMENU)IDC_REBAR, hInstance, NULL);
-
-	REBARINFO rbi;
-	rbi.cbSize = sizeof(REBARINFO);
-	rbi.fMask = 0;
-	rbi.himl = (HIMAGELIST)NULL;
-	SendMessage(hwndReBar, RB_SETBARINFO, 0, (LPARAM)&rbi);
+// Create rebar
+// https://stackoverflow.com/questions/75961895/why-does-my-win32-rebar-appear-distorted	
+// hwndReBar = CreateWindowEx(WS_EX_TOOLWINDOW, REBARCLASSNAME, NULL, dwReBarStyle,
+//							   0, 0, 0, 0, hwnd, (HMENU)IDC_REBAR, hInstance, NULL);
+    LRESULT  lResult;
+	
+	hwndReBar = CreateWindowEx(
+		WS_EX_TOOLWINDOW | TBSTYLE_EX_HIDECLIPPEDBUTTONS
+		,
+        REBARCLASSNAME,
+        NULL,
+        WS_VISIBLE |
+        WS_BORDER |
+        WS_CHILD |
+        WS_CLIPCHILDREN |
+        WS_CLIPSIBLINGS |
+        RBS_VARHEIGHT |
+        RBS_BANDBORDERS |
+        0,
+        0,
+        0,
+        0,
+        0,
+        hwnd,
+        NULL,		
+        hInstance,
+        NULL);
 
 	REBARBANDINFO rbBand;
-	rbBand.cbSize = sizeof(REBARBANDINFO);
-	rbBand.fMask = /*RBBIM_COLORS | RBBIM_TEXT | RBBIM_BACKGROUND | */
-		RBBIM_STYLE | RBBIM_CHILD | RBBIM_CHILDSIZE /*| RBBIM_SIZE*/;
-	rbBand.fStyle	 = /*RBBS_CHILDEDGE |*//* RBBS_BREAK |*/ RBBS_FIXEDSIZE /*| RBBS_GRIPPERALWAYS*/;
+	rbBand.cbSize = REBARBANDINFO_V3_SIZE;//sizeof(REBARBANDINFO);
+	rbBand.fMask = RBBIM_STYLE | RBBIM_CHILD | RBBIM_CHILDSIZE;
+
+//	rbBand.fStyle	 = CCS_NORESIZE | CCS_NOPARENTALIGN | CCS_NODIVIDER | WS_CHILD | WS_VISIBLE | CCS_ADJUSTABLE | TBSTYLE_ALTDRAG | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS;
+	rbBand.fStyle =	 RBBS_FIXEDSIZE;
 	if (bIsAppThemed) {
 		rbBand.fStyle |= RBBS_CHILDEDGE;
-	}
-	rbBand.hbmBack = NULL;
+	}	
+	//rbBand.hbmBack = NULL;
 	rbBand.lpText = (LPWSTR)L"Toolbar";
 	rbBand.hwndChild = hwndToolbar;
 	rbBand.cxMinChild = (rc.right - rc.left) * COUNTOF(tbbMainWnd);
 	rbBand.cyMinChild = (rc.bottom - rc.top) + 2 * rc.top;
-	rbBand.cx		= 0;
+	rbBand.cx		= 0;	
 	SendMessage(hwndReBar, RB_INSERTBAND, (WPARAM)(-1), (LPARAM)&rbBand);
-
+	
+	
 	SetWindowPos(hwndReBar, NULL, 0, 0, 0, 0, SWP_NOZORDER);
 	GetWindowRect(hwndReBar, &rc);
 	cyReBar = rc.bottom - rc.top;
 	cyReBarFrame = bIsAppThemed ? 0 : 2;
+		
 }
-
+// -------------------------------------------
+// 
+// -------------------------------------------
 void RecreateBars(HWND hwnd, HINSTANCE hInstance) {
 	Toolbar_GetButtons(hwndToolbar, TOOLBAR_COMMAND_BASE, tchToolbarButtons, COUNTOF(tchToolbarButtons));
 
@@ -2405,6 +2482,7 @@ void MsgNotifyZoom(void) {
 //
 //
 void MsgInitMenu(HWND hwnd, WPARAM wParam, LPARAM lParam) {
+
 	UNREFERENCED_PARAMETER(lParam);
 
 	HMENU hmenu = (HMENU)wParam;
@@ -2758,6 +2836,8 @@ LRESULT MsgCommand(HWND hwnd, WPARAM wParam, LPARAM lParam) {
 
 	switch (LOWORD(wParam)) {
 	case IDM_FILE_NEW:
+		 SetWindowTheme(hwnd, L"DarkMode_Explorer", NULL);
+		//SetWindowTheme(hwnd, L"Explorer", NULL);
 		FileLoad(FileLoadFlag_New, L"");
 		break;
 
@@ -5345,7 +5425,7 @@ LRESULT MsgNotify(HWND hwnd, WPARAM wParam, LPARAM lParam) {
 			HMENU hmenu = NULL;
 			HMENU subMenu = NULL;
 			if (lpTbNotify->iItem == IDT_FILE_OPEN) {
-				NP2_static_assert(IDM_RECENT_HISTORY_START + MRU_MAXITEMS == IDM_RECENT_HISTORY_END);
+				//NP2_static_assert(IDM_RECENT_HISTORY_START + MRU_MAXITEMS == IDM_RECENT_HISTORY_END);
 				if (mruFile.iSize <= 0) {
 					return TBDDRET_TREATPRESSED;
 				}
